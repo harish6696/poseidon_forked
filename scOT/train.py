@@ -251,29 +251,37 @@ if __name__ == "__main__":
 
     model_config = (
         ScOTConfig(
-            image_size=resolution,
-            patch_size=config["patch_size"],
-            num_channels=input_dim,
-            num_out_channels=output_dim,
-            embed_dim=config["embed_dim"], #48
-            depths=config["depths"], # [4, 4, 4, 4] for T
-            num_heads=config["num_heads"], # [3, 6, 12, 24] for T
-            skip_connections=config["skip_connections"], # [2, 2, 2, 0]
-            window_size=config["window_size"], #16
-            mlp_ratio=config["mlp_ratio"], #4.0
-            qkv_bias=True,
-            hidden_dropout_prob=0.0,  # default
-            attention_probs_dropout_prob=0.0,  # default
-            drop_path_rate=0.0,
-            hidden_act="gelu",
-            use_absolute_embeddings=False,
-            initializer_range=0.02,
-            layer_norm_eps=1e-5,
-            p=1,
-            channel_slice_list_normalized_loss=channel_slice_list, # for PT: [0, 1, 3, 4]
-            residual_model="convnext",
-            use_conditioning=time_involved, #true for both CERP(PT) and poisson (FT)
-            learn_residual=False,
+            image_size=resolution, # 128
+            patch_size=config["patch_size"], #4 predefined for each Model in MODEL_MAP as well as *
+            num_channels=input_dim, #4
+            num_out_channels=output_dim, #4
+            embed_dim=config["embed_dim"], #* 48 # base dimensionality of patch embeddings (size of feature vector used to represent each patch)
+            depths=config["depths"], #* # [4, 4, 4, 4] number of transformer blocks in encoder / decoder stages e.g. 4 stages each with 4 transformer blocks
+            # len(depths) = num_layers (for encoder and decoder)
+            # encoder: each stage downsamples input (reduces spatial resolution) but increases feature depth (dimensionality of embeddings)
+            # decoder: each stage upsamples spatial resolution and reduces feature dimension
+            num_heads=config["num_heads"], #* [3, 6, 12, 24], used in Swinv2SelfAttention (HF) (see ScOTEncoder: each stage has own num_heads
+            # number of separate attention machanisms run in parallel
+            # attend to different local spatial features inside each window
+            skip_connections=config["skip_connections"], #* # [2, 2, 2, 0] depth of skip connections
+            window_size=config["window_size"], #* # defines spatial region over which self-attention is computed in one local block instead of expensive global self-attention
+            # (each patch attends to every other patch);
+            # shifted window position between layers (see figure 2c)
+            mlp_ratio=config["mlp_ratio"], #* # used in Swinv2Intermediate (HF) to expand hidden state (model gets more capacity to learn non-linear transformations
+            qkv_bias=True, # disable / enable bias in self-attention (Q = X @ W_Q + b_Q; K = X @ W_K + b_K; V = X @ W_V + b_V) # used in Swinv2SelfAttention (HF)
+            hidden_dropout_prob=0.0,  # default # for the dropout in ScOT embedding
+            attention_probs_dropout_prob=0.0,  # default # dropout in Swinv2SelfAttention (HF)
+            drop_path_rate=0.0, # used to create drop path for each ScOTEncodeStage in Encoder and ScOTDecodeStage in Decoder, is max. value
+            hidden_act="gelu", # hidden activation function in Swinv2Intermediate (HF)
+            use_absolute_embeddings=False, # absolute position information into the patch embeddings (spatial structure of trajectory); different to time_conditioning
+            initializer_range=0.02, # Swinv2PreTrainedModel (HF), std of normal distribution to initialize weights
+            layer_norm_eps=1e-5, # used in layer_norm both ConditionalLayerNorm and LayerNorm; add to variance of normalization to avoid division by zero and stabilize training
+            p=1, # 1: l1 loss , 2: l2 loss
+            channel_slice_list_normalized_loss=channel_slice_list, # if None will fall back to absolute loss otherwise normalized loss with split channels
+            # divide output tensor into channel slices and compute normalized loss per slice (and then average)
+            residual_model="convnext", # either convnext or resnet
+            use_conditioning=time_involved, # if True ConditionalLayerNorm is used otherwise LayerNorm
+            learn_residual=False, # can only be used if use_conditioning is True -> model trained to predict residual (difference) between input and target, rather than full output directly
         )
         if params.finetune_from is None or params.replace_embedding_recovery
         else None
@@ -307,7 +315,7 @@ if __name__ == "__main__":
         adam_epsilon=1e-8,  # default
         lr_scheduler_type=config["lr_scheduler"],
         warmup_ratio=config["warmup_ratio"],
-        log_level="passive",
+        log_level='debug', #"passive" for not displaying debug information
         logging_strategy="steps",
         logging_steps=5,
         logging_nan_inf_filter=False,
