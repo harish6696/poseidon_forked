@@ -1,0 +1,84 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Poseidon T- Fine tune",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scOT/train.py",
+            "console": "integratedTerminal",
+            "args": ["--config",
+                "./configs/run_ft.yaml",
+                "--data_path",
+                "./data_ft",
+                "--checkpoint_path",
+                "./ckpts",
+                "--finetune_from",
+                "camlab-ethz/Poseidon-T",
+                "--replace_embedding_recovery"
+                    ], 
+            "justMyCode": false
+        },
+        {
+            "name": "Poseidon Accelerate",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "accelerate.commands.launch",
+            "console": "integratedTerminal",
+            "args": ["scOT/train.py",
+                "--config",
+                "./configs/run_ft.yaml",
+                "--data_path",
+                "./data_ft",
+                "--checkpoint_path",
+                "./ckpts",
+                "--finetune_from",
+                "camlab-ethz/Poseidon-T",
+                "--replace_embedding_recovery"
+                    ], 
+            "justMyCode": false
+        },
+        {
+            "name": "Poseidon Pre training",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scOT/train.py",
+            "console": "integratedTerminal",
+            "args": ["--config",
+                "./configs/run_pt.yaml",
+                "--data_path",
+                "./data_pt",
+                "--checkpoint_path",
+                "./ckpts",
+ ], 
+            "justMyCode": false
+        },
+
+        {
+            "name": "poseidon-infer-poisson",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./scOT/inference.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--model_path",
+                "./ckpts/scOT/bumbling-puddle-10",
+                "--ckpt_dir",
+                "./ckpts",
+                "--data_path",
+                "./data_ft",
+                "--dataset",
+                "elliptic.poisson.Gaussians(.time)",
+                "--mode",
+                "eval",
+                "--append_time",
+                "--batch_size",
+                "5",
+            ]
+        }
+    ]
+}

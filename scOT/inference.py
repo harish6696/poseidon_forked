@@ -25,7 +25,7 @@ from scOT.trainer import TrainingArguments, Trainer
 from scOT.problems.base import get_dataset, BaseTimeDataset
 from scOT.metrics import relative_lp_error, lp_error
 
-
+from scOT.train import create_predictions_plot
 SEED = 0
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -347,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--file",
         type=str,
-        required=True,
+        required=False, #changed
         help="File to load/write to. May also be a directory to save samples.",
     )
     parser.add_argument(
@@ -942,9 +942,19 @@ if __name__ == "__main__":
                     )
                 )
 
-        if os.path.exists(params.file):
-            df = pd.read_csv(params.file)
-        else:
-            df = pd.DataFrame()
-        df = pd.concat([df, pd.DataFrame(data)], ignore_index=True)
-        df.to_csv(params.file, index=False)
+        # if os.path.exists(params.file):
+        #     df = pd.read_csv(params.file)
+        # else:
+        #     df = pd.DataFrame()
+        # df = pd.concat([df, pd.DataFrame(data)], ignore_index=True)
+        # df.to_csv(params.file, index=False)
+
+    predictions = trainer.predict(dataset, metric_key_prefix="")
+
+    create_predictions_plot(
+                predictions.predictions,
+                predictions.label_ids,
+                wandb_prefix="test",
+            )
+
+

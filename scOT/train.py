@@ -12,8 +12,7 @@ import random
 import json
 import psutil
 import os
-
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"           
 import yaml
 import matplotlib.pyplot as plt
 import transformers
@@ -113,7 +112,8 @@ def create_predictions_plot(predictions, labels, wandb_prefix):
         ax.set_xticks([])
         ax.set_yticks([])
 
-    wandb.log({wandb_prefix + "/predictions": wandb.Image(fig)})
+    #wandb.log({wandb_prefix + "/predictions": wandb.Image(fig)}) #changed
+    plt.savefig(f"./{wandb_prefix}_prediction.png")
     plt.close()
 
 
@@ -132,7 +132,7 @@ def setup(params, model_map=True):
 
     if RANK == 0 or RANK == -1:
         run = wandb.init(
-            project=params.wandb_project_name, name=params.wandb_run_name, config=config
+            project=params.wandb_project_name, name=params.wandb_run_name, config=config, mode="disabled"
         )
         config = wandb.config
     else:
@@ -162,6 +162,10 @@ def setup(params, model_map=True):
                 + run.name
             )
         else:
+            if run.project is None:
+                run.project = "default_project"
+            if run.name is None:
+                run.name = "default_run"
             ckpt_dir = params.checkpoint_path + "/" + run.project + "/" + run.name
     if (RANK == 0 or RANK == -1) and not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
@@ -200,27 +204,28 @@ if __name__ == "__main__":
         if ("incompressible" in config["dataset"]) and params.just_velocities
         else {}
     )
-    if params.move_data is not None:
-        train_eval_set_kwargs["move_to_local_scratch"] = params.move_data
-    if params.max_num_train_time_steps is not None:
+    if params.move_data is not None:    #None
+        train_eval_set_kwargs["move_to_local_scratch"] = params.move_data 
+    if params.max_num_train_time_steps is not None: #None
         train_eval_set_kwargs["max_num_time_steps"] = params.max_num_train_time_steps
-    if params.train_time_step_size is not None:
+    if params.train_time_step_size is not None: #None
         train_eval_set_kwargs["time_step_size"] = params.train_time_step_size
-    if params.train_small_time_transition:
+    if params.train_small_time_transition: #False
         train_eval_set_kwargs["allowed_time_transitions"] = [1]
+    
     train_dataset = get_dataset(
         dataset=config["dataset"],
         which="train",
-        num_trajectories=config["num_trajectories"],
-        data_path=params.data_path,
-        **train_eval_set_kwargs,
+        num_trajectories=config["num_trajectories"], #set to 128
+        data_path=params.data_path, #./data_pt or ./data_ft
+        **train_eval_set_kwargs,  #{"max_num_time_steps": 7, "time_step_size": 2}
     )
     eval_dataset = get_dataset(
         dataset=config["dataset"],
         which="val",
         num_trajectories=config["num_trajectories"],
         data_path=params.data_path,
-        **train_eval_set_kwargs,
+        **train_eval_set_kwargs,  #{"max_num_time_steps": 7, "time_step_size": 2}
     )
 
     config["effective_train_set_size"] = len(train_dataset)
@@ -250,12 +255,12 @@ if __name__ == "__main__":
             patch_size=config["patch_size"],
             num_channels=input_dim,
             num_out_channels=output_dim,
-            embed_dim=config["embed_dim"],
-            depths=config["depths"],
-            num_heads=config["num_heads"],
-            skip_connections=config["skip_connections"],
-            window_size=config["window_size"],
-            mlp_ratio=config["mlp_ratio"],
+            embed_dim=config["embed_dim"], #48
+            depths=config["depths"], # [4, 4, 4, 4] for T
+            num_heads=config["num_heads"], # [3, 6, 12, 24] for T
+            skip_connections=config["skip_connections"], # [2, 2, 2, 0]
+            window_size=config["window_size"], #16
+            mlp_ratio=config["mlp_ratio"], #4.0
             qkv_bias=True,
             hidden_dropout_prob=0.0,  # default
             attention_probs_dropout_prob=0.0,  # default
@@ -265,9 +270,9 @@ if __name__ == "__main__":
             initializer_range=0.02,
             layer_norm_eps=1e-5,
             p=1,
-            channel_slice_list_normalized_loss=channel_slice_list,
+            channel_slice_list_normalized_loss=channel_slice_list, # for PT: [0, 1, 3, 4]
             residual_model="convnext",
-            use_conditioning=time_involved,
+            use_conditioning=time_involved, #true for both CERP(PT) and poisson (FT)
             learn_residual=False,
         )
         if params.finetune_from is None or params.replace_embedding_recovery
@@ -277,7 +282,8 @@ if __name__ == "__main__":
     train_config = TrainingArguments(
         output_dir=ckpt_dir,
         overwrite_output_dir=True,  #! OVERWRITE THIS DIRECTORY IN CASE, also for resuming training
-        evaluation_strategy="epoch",
+        evaluation_strategy="steps",
+        eval_steps=25,
         per_device_train_batch_size=config["batch_size"],
         per_device_eval_batch_size=config["batch_size"],
         eval_accumulation_steps=16,
@@ -285,12 +291,12 @@ if __name__ == "__main__":
         num_train_epochs=config["num_epochs"],
         optim="adamw_torch",
         learning_rate=config["lr"],
-        learning_rate_embedding_recovery=(
+        learning_rate_embedding_recovery=(    #only used for finetuning..
             None
             if (params.finetune_from is None or "lr_embedding_recovery" not in config)
             else config["lr_embedding_recovery"]
         ),
-        learning_rate_time_embedding=(
+        learning_rate_time_embedding=(   #only used for finetuning..
             None
             if (params.finetune_from is None or "lr_time_embedding" not in config)
             else config["lr_time_embedding"]
@@ -310,7 +316,7 @@ if __name__ == "__main__":
         seed=SEED,
         fp16=False,
         dataloader_num_workers=CPU_CORES,
-        load_best_model_at_end=True,
+        load_best_model_at_end=False,#TODO: change to true LATER
         metric_for_best_model="loss",
         greater_is_better=False,
         dataloader_pin_memory=True,
@@ -318,7 +324,7 @@ if __name__ == "__main__":
         auto_find_batch_size=False,
         full_determinism=False,
         torch_compile=False,
-        report_to="wandb",
+        report_to="wandb",  
         run_name=params.wandb_run_name,
     )
 
@@ -334,8 +340,8 @@ if __name__ == "__main__":
     else:
         model = ScOT(model_config)
     num_params = get_num_parameters(model)
-    config["num_params"] = num_params
-    num_params_no_embed = get_num_parameters_no_embed(model)
+    config["num_params"] = num_params #Total number of trainable parameters in a scOT model.
+    num_params_no_embed = get_num_parameters_no_embed(model) #Returns the number of trainable parameters in a scOT model without embedding and recovery.
     config["num_params_wout_embed"] = num_params_no_embed
     if RANK == 0 or RANK == -1:
         print(f"Model size: {num_params}")
@@ -403,15 +409,25 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=compute_metrics,
-        callbacks=[early_stopping],
+        #callbacks=[early_stopping],
     )
-
-    trainer.train(resume_from_checkpoint=params.resume_training)
+    ####adding trainer ar_steps TODO: Remove this, only for debugging
+    #if config["dataset"] == "fluids.compressible.Riemann":
+    #     trainer.set_ar_steps(ar_steps=3, output_all_steps=True)
+    #################################################################
+    trainer.train(resume_from_checkpoint=params.resume_training)  #train function inside the transformers code
     trainer.save_model(train_config.output_dir)
     
     if (RANK == 0 or RANK == -1) and params.push_to_hf_hub is not None:
         model.push_to_hub(params.push_to_hf_hub)
 
+##########################################################################
+# Testing performed on 4 cases:
+# Case 1. One step "in-distribution" prediction from (t=0 --> t=14)
+# Case 2. One step "out-of-distribution" prediction from (t=0 --> t=20)
+# Case 3. "autoregressive in-distribution" prediction from (t=0 --> t=2 --> t=4 --> t=6 --> t=8 --> t=10 --> t=12 --> t=14) #7 steps hardcoded in base.py
+# Case 4. "autoregressive out-of-distribution" prediction from (t=0 --> t=2 --> t=4 --> t=6 --> t=8 --> t=10 --> t=12 --> t=14 --> t=16 --> t=18 --> t=20) #10 steps hardcoded in base.py
+##########################################################################
     do_test = (
         True
         if params.max_num_train_time_steps is None
@@ -422,33 +438,33 @@ if __name__ == "__main__":
     )
     if do_test:
         print("Testing...")
-        test_set_kwargs = (
+        test_set_kwargs = ( #test_set_kwargs is empty (for now)
             {"just_velocities": True}
-            if ("incompressible" in config["dataset"]) and params.just_velocities
+            if ("incompressible" in config["dataset"]) and params.just_velocities #params.just_velocities is false
             else {}
         )
-        out_test_set_kwargs = (
+        out_test_set_kwargs = ( #out_test_set_kwargs is empty (for now)
             {"just_velocities": True}
-            if ("incompressible" in config["dataset"]) and params.just_velocities
+            if ("incompressible" in config["dataset"]) and params.just_velocities #params.just_velocities is false
             else {}
         )
-        if params.move_data is not None:
+        if params.move_data is not None: #params.move_data is None
             test_set_kwargs["move_to_local_scratch"] = params.move_data
             out_test_set_kwargs["move_to_local_scratch"] = params.move_data
-        if time_involved:
-            test_set_kwargs = {
+        if time_involved: #time_involved is true
+            test_set_kwargs = { #in-distribution
                 **test_set_kwargs,
-                "max_num_time_steps": 1,
-                "time_step_size": 14,
+                "max_num_time_steps": 1, #this was 7 in the training/validation set
+                "time_step_size": 14, #this was 2 in the training/validation set
                 "allowed_time_transitions": [1],
             }
-            out_test_set_kwargs = {
+            out_test_set_kwargs = { #out-of-distribution
                 **out_test_set_kwargs,
                 "max_num_time_steps": 1,
                 "time_step_size": 20,
                 "allowed_time_transitions": [1],
             }
-        if "RayleighTaylor" in config["dataset"]:
+        if "RayleighTaylor" in config["dataset"]: #skipped for now
             test_set_kwargs = {
                 **test_set_kwargs,
                 "max_num_time_steps": 1,
@@ -462,24 +478,27 @@ if __name__ == "__main__":
                 "allowed_time_transitions": [1],
             }
 
-        test_dataset = get_dataset(
+        test_dataset = get_dataset(  #test_dataset.__dict__['time_indices'] = [(0, 14)]
             dataset=config["dataset"],
             which="test",
             num_trajectories=config["num_trajectories"],
             data_path=params.data_path,
-            **test_set_kwargs,
-        )
-        try:
-            out_dist_test_dataset = get_dataset(
-                dataset=config["dataset"] + ".out",
+            **test_set_kwargs,  #{"max_num_time_steps": 1, "time_step_size": 14, "allowed_time_transitions": [1]}
+        ) #time step size is 14 means that the model inputs data at t=0 and outputs data at t=14
+        
+        try: #checks if the dataset exists with the name config["dataset"] + ".out"
+            out_dist_test_dataset = get_dataset( 
+                dataset=config["dataset"] + ".out", #just a different max_num_time_steps..for OOD max_num_time_steps=10 and for reguar testing max_num_time_steps = 7 which is the same as the training set
                 which="test",
                 num_trajectories=config["num_trajectories"],
                 data_path=params.data_path,
                 **out_test_set_kwargs,
-            )
+            ) #out_dist_test_dataset.__dict__['time_indices'] = [(0, 20)]
         except:
             out_dist_test_dataset = None
-        predictions = trainer.predict(test_dataset, metric_key_prefix="")
+        
+        #Case 1: One step in-distribution prediction from (t=0 --> t=14)
+        predictions = trainer.predict(test_dataset, metric_key_prefix="") #uses the prediction_step() function in the trainer class which overrides the prediction_step()  function in the trainer class
         if RANK == 0 or RANK == -1:
             metrics = {}
             for key, value in predictions.metrics.items():
@@ -491,7 +510,7 @@ if __name__ == "__main__":
                 wandb_prefix="test",
             )
 
-        # evaluate on out-of-distribution test set
+        #Case 2: One step out-of-distribution prediction from (t=0 --> t=20)
         if out_dist_test_dataset is not None:
             predictions = trainer.predict(out_dist_test_dataset, metric_key_prefix="")
             if RANK == 0 or RANK == -1:
@@ -506,6 +525,7 @@ if __name__ == "__main__":
                 )
 
         if time_involved and (test_set_kwargs["time_step_size"] // 2 > 0):
+            #Case 3: One step autoregressive prediction for in-distribution data from (t=0 --> t=2 --> t=4 --> t=6 --> t=8 --> t=10 --> t=12 --> t=14)
             trainer.set_ar_steps(test_set_kwargs["time_step_size"] // 2)
             predictions = trainer.predict(test_dataset, metric_key_prefix="")
             if RANK == 0 or RANK == -1:
@@ -516,10 +536,10 @@ if __name__ == "__main__":
                 create_predictions_plot(
                     predictions.predictions,
                     predictions.label_ids,
-                    wandb_prefix="test/ar",
+                    wandb_prefix="test_ar",
                 )
 
-            # evaluate on out-of-distribution test set
+            #Case 4: Out of distribution prediction from (t=0 --> t=2, t=4, t=6, t=8, t=10, t=12, t=14, t=16, t=18, t=20)
             if out_dist_test_dataset is not None:
                 trainer.set_ar_steps(out_test_set_kwargs["time_step_size"] // 2)
                 predictions = trainer.predict(
@@ -533,5 +553,5 @@ if __name__ == "__main__":
                     create_predictions_plot(
                         predictions.predictions,
                         predictions.label_ids,
-                        wandb_prefix="test_out_dist/ar",
+                        wandb_prefix="test_out_dist_ar",
                     )

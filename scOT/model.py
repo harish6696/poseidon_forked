@@ -454,10 +454,10 @@ class ScOTLayer(nn.Module):
                     img_mask[:, height_slice, width_slice, :] = count
                     count += 1
 
-            mask_windows = window_partition(img_mask, self.window_size)
+            mask_windows = window_partition(img_mask, self.window_size) #partition into windows and stack in dim 0
             mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
             attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.masked_fill(
+            attn_mask = attn_mask.maskeda23_fill(
                 attn_mask != 0, float(-100.0)
             ).masked_fill(attn_mask == 0, float(0.0))
         else:
@@ -1290,7 +1290,12 @@ class ScOT(Swinv2PreTrainedModel):
         image_hat = torch.fft.ifftshift(torch.complex(real, imag))
         image = torch.fft.ifft2(image_hat, norm="forward").real
         return image
-
+    ##vimp: The forward function SHOULD have the following keys as arguments:
+    # pixel_values: input image
+    # time: time step
+    # labels: target image
+    # pixel_mask: mask for the input image
+    #else they will be removed from the output of the train_loader by the collate function: Refer to the class RemoveColumnsCollator
     def forward(
         self,
         pixel_values: Optional[torch.FloatTensor] = None,

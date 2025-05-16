@@ -43,7 +43,7 @@ def get_dataset(dataset, **kwargs):
     **kwargs overwrite the default settings.
     .time is a time-wrapped time-independent dataset.
     """
-    if isinstance(dataset, list):
+    if isinstance(dataset, list):  #dataset example for PT: fluids.compressible.Riemann
         return ConcatDataset([get_dataset(d, **kwargs) for d in dataset])
     if "fluids" in dataset:
         if "fluids.incompressible" in dataset:
@@ -66,6 +66,7 @@ def get_dataset(dataset, **kwargs):
                     raise ValueError(f"Unknown dataset {dataset}")
             else:
                 raise ValueError(f"Unknown dataset {dataset}")
+        
         elif "fluids.compressible" in dataset:
             if "gravity" in dataset:
                 if "RayleighTaylor" in dataset:
@@ -106,12 +107,13 @@ def get_dataset(dataset, **kwargs):
                     raise ValueError(f"Unknown dataset {dataset}")
             else:
                 raise ValueError(f"Unknown dataset {dataset}")
+        
         else:
             raise ValueError(f"Unknown dataset {dataset}")
-        if "out" in dataset:
+        if "out" in dataset: #this is during out of distribution inference
             default_time_settings = {"max_num_time_steps": 10, "time_step_size": 2}
         else:
-            default_time_settings = {"max_num_time_steps": 7, "time_step_size": 2}
+            default_time_settings = {"max_num_time_steps": 7, "time_step_size": 2} #this is used in CERP for training/val and testing (inference)
         if "tracer" in dataset:
             tracer = True
         else:
@@ -160,7 +162,7 @@ def get_dataset(dataset, **kwargs):
 
     return dset(**kwargs) if ".time" not in dataset else TimeWrapper(dset(**kwargs))
 
-
+#for time "in"dependent problems use BaseDataset
 class BaseDataset(Dataset, ABC):
     """A base class for all datasets. Can be directly derived from if you have a steady/non-time dependent problem."""
 
@@ -190,7 +192,7 @@ class BaseDataset(Dataset, ABC):
         self.move_to_local_scratch = move_to_local_scratch
 
     def _move_to_local_scratch(self, file_path):
-        if self.move_to_local_scratch is not None:
+        if self.move_to_local_scratch is not None:  #by default it is None
             data_dir = os.path.join(self.data_path, file_path)
             file = file_path.split("/")[-1]
             scratch_dir = self.move_to_local_scratch
@@ -216,15 +218,16 @@ class BaseDataset(Dataset, ABC):
             and self.N_max > 0
             and self.N_max >= self.N_val + self.N_test
         )
-        if self.num_trajectories == -1:
-            self.num_trajectories = self.N_max - self.N_val - self.N_test
-        elif self.num_trajectories == -2:
+        if self.num_trajectories == -1: #consider all data available for training
+            self.num_trajectories = self.N_max - self.N_val - self.N_test 
+        elif self.num_trajectories == -2: #consider only half of the data for training
             self.num_trajectories = (self.N_max - self.N_val - self.N_test) // 2
-        elif self.num_trajectories == -8:
+        elif self.num_trajectories == -8: #consider only one eigth of the data for training
             self.num_trajectories = (self.N_max - self.N_val - self.N_test) // 8
         assert self.num_trajectories + self.N_val + self.N_test <= self.N_max
         assert self.N_val is not None and self.N_val > 0
         assert self.N_test is not None and self.N_test > 0
+        # the below setup is for the time-independent problems (different for the time-dependent problems: BaseTimeDataset)
         if self.which == "train":
             self.length = self.num_trajectories
             self.start = 0
@@ -272,7 +275,7 @@ class BaseDataset(Dataset, ABC):
                 beautiful_descriptors.append(match)
         return beautiful_descriptors, channel_slice_list
 
-
+# for time dependent problems use BaseTimeDataset
 class BaseTimeDataset(BaseDataset, ABC):
     """A base class for time dependent problems. Inherit time-dependent problems from here."""
 
@@ -307,7 +310,7 @@ class BaseTimeDataset(BaseDataset, ABC):
         _idx = idx - i * self.multiplier
 
         if self.fix_input_to_time_step is None:
-            t1, t2 = self.time_indices[_idx]
+            t1, t2 = self.time_indices[_idx] #self.time_indices are the same  for each trajectory
             assert t2 >= t1
             t = t2 - t1
         else:
@@ -325,36 +328,61 @@ class BaseTimeDataset(BaseDataset, ABC):
             self.N_max is not None
             and self.N_max > 0
             and self.N_max >= self.N_val + self.N_test
-        )
-        if self.num_trajectories == -1:
-            self.num_trajectories = self.N_max - self.N_val - self.N_test
-        elif self.num_trajectories == -2:
+        ) 
+        # for CERP: self.N_max=10,000 (Max trajectories available in the dataset) : 
+        # self.N_val=120 (number of trajectories used for training), 
+        # self.N_test (number of trajectories used for testing/inference)=240 as mentioned in class CompressibleBase()
+        if self.num_trajectories == -1: #consider all data available for training, for CE-RP: self.N_max=10,000 : self.N_val=120, self.N_test=240 as mentioned in class CompressibleBase()
+            self.num_trajectories = self.N_max - self.N_val - self.N_test #for CERP: 10,000-120-240=9640 training trajectories
+        elif self.num_trajectories == -2: #consider only half of the data for training
             self.num_trajectories = (self.N_max - self.N_val - self.N_test) // 2
-        elif self.num_trajectories == -8:
+        elif self.num_trajectories == -8: #consider only one eigth of the data for training
             self.num_trajectories = (self.N_max - self.N_val - self.N_test) // 8
         assert self.num_trajectories + self.N_val + self.N_test <= self.N_max
         assert self.N_val is not None and self.N_val > 0
         assert self.N_test is not None and self.N_test > 0
         assert self.max_num_time_steps is not None and self.max_num_time_steps > 0
-
+        #self.max_num_time_steps=7
         if self.fix_input_to_time_step is not None:
             self.multiplier = self.max_num_time_steps
-        else:
-            self.time_indices = []
+        else: #self.time_indices required for all2all training
+            self.time_indices = [] #self.time_step_size=2, self.max_num_time_steps=7 (for training/val), 
+                                   #self.max_num_time_steps=1 (for testing)
             for i in range(self.max_num_time_steps + 1):
                 for j in range(i, self.max_num_time_steps + 1):
                     if (
-                        self.allowed_time_transitions is not None
-                        and (j - i) not in self.allowed_time_transitions
-                    ):
-                        continue
-                    self.time_indices.append(
+                        self.allowed_time_transitions is not None #none for training/val, [1] for testing
+                        and (j - i) not in self.allowed_time_transitions #self.allowed_time_transition dictates which (i,j) pairs are allowed. if j-i doesnt exist in the list, then skip that pair and continue
+                    ): #this is false while train/val (allowed_time_transitions=None); while testing, this is true
+                        continue #comtinues to the j-loop (obv)
+                    
+                    self.time_indices.append( #if (j-i) is in the allowed_time_transitions list, then append the pair to the self.time_indices list with the appropriate time_step_size (i.e time skip)
                         (self.time_step_size * i, self.time_step_size * j)
                     )
             self.multiplier = len(self.time_indices)
 
-        if self.which == "train":
-            self.length = self.num_trajectories * self.multiplier
+            #for testing, the above loop runs with i=0,1 and j=0,1
+                #for i=0, j=0, (0,0) is not added to the list as (j-i = 0) is not in the allowed_time_transitions list = [1]
+                #for i=0, j=1, (0,1) is added to the list as (j-i = 1) is in the allowed_time_transitions list = [1]
+                #self.time_indices = [(0,14)]# for one step in-distribution prediction
+                #for i=1, j=1, (1,1) is not added to the list as (j-i = 0) is not in the allowed_time_transitions list = [1]
+                #thats the end of the loop
+                #self.time_indices = [(0,14)]# for one step in-distribution prediction
+
+        #for CERP training/val, the above loop runs with i=0,1,2,3,4,5,6,7 and j=0,1,2,3,4,5,6,7
+        #self.multiplier= 36 = len(self.time_indices)
+        #self.time_indices for CERP
+        #[(0, 0), (0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), (0, 14), 
+        # (2, 2), (2, 4), (2, 6), (2, 8), (2, 10), (2, 12), (2, 14), 
+        # (4, 4), (4, 6), (4, 8), (4, 10), (4, 12), (4, 14), 
+        # (6, 6), (6, 8), (6, 10), (6, 12), (6, 14), 
+        # (8, 8), (8, 10), (8, 12), (8, 14), 
+        # (10, 10), (10, 12), (10, 14), 
+        # (12, 12), (12, 14), 
+        # (14, 14)]
+        #the below setup is for the time-dependent problems (different for the time-independent problems in class BaseDataset) 
+        if self.which == "train": #self.length is the number of ip-op pairs
+            self.length = self.num_trajectories * self.multiplier #4608 =128*36 for CERP  (128 set in yaml)
             self.start = 0
         elif self.which == "val":
             self.length = self.N_val * self.multiplier
@@ -362,7 +390,7 @@ class BaseTimeDataset(BaseDataset, ABC):
         else:
             self.length = self.N_test * self.multiplier
             self.start = self.N_max - self.N_test
-
+        #self.label_description='[rho],[u,v],[p]'
         self.output_dim = self.label_description.count(",") + 1
         descriptors, channel_slice_list = self.get_channel_lists(self.label_description)
         self.printable_channel_description = descriptors
@@ -371,7 +399,6 @@ class BaseTimeDataset(BaseDataset, ABC):
 
 class TimeWrapper(BaseTimeDataset):
     """For time-independent problems to be plugged into time-dependent models."""
-
     def __init__(self, dataset):
         super().__init__(
             dataset.which,

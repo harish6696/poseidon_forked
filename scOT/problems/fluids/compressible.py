@@ -200,7 +200,7 @@ class CompressibleBase(BaseTimeDataset):
         self.tracer = tracer
 
         data_path = self.data_path + file_path
-        data_path = self._move_to_local_scratch(data_path)
+        data_path = self._move_to_local_scratch(data_path) #'./data_pt/CE-RP.nc'
         self.reader = h5py.File(data_path, "r")
 
         self.constants = copy.deepcopy(CONSTANTS)
@@ -216,22 +216,22 @@ class CompressibleBase(BaseTimeDataset):
             else torch.tensor([False, False, False, False, False])
         )
 
-        self.post_init()
+        self.post_init() #this is where All2All time_indices are created
 
     def __getitem__(self, idx):
-        i, t, t1, t2 = self._idx_map(idx)
-        time = t / self.constants["time"]
-
+        i, t, t1, t2 = self._idx_map(idx)# CE-RP-there are 128 trajectories (yaml) with each having 36 i/p-o/p pairs, so idx is selected from 0 to 128*36-1=4607
+        time = t / self.constants["time"] #self.constants["time"]=20.0
+        #self.reader["data"].shape=(10000, 21, 5, 128, 128), the 5th channel is the tracer (For CE-RP it is 0s)
         inputs = (
-            torch.from_numpy(self.reader["data"][i + self.start, t1, 0:4])
+            torch.from_numpy(self.reader["data"][i + self.start, t1, 0:4]) #0:4 is the channel slice (tracer excluded by default)
             .type(torch.float32)
             .reshape(4, self.resolution, self.resolution)
-        )
+        )  #inputs.shape = torch.Size([4, 128, 128])
         label = (
             torch.from_numpy(self.reader["data"][i + self.start, t2, 0:4])
             .type(torch.float32)
             .reshape(4, self.resolution, self.resolution)
-        )
+        )  #label.shape= torch.Size([4, 128, 128])
 
         inputs[3] = inputs[3] - self.mean_pressure
         label[3] = label[3] - self.mean_pressure
@@ -239,9 +239,9 @@ class CompressibleBase(BaseTimeDataset):
         inputs = (inputs - self.constants["mean"]) / self.constants["std"]
         label = (label - self.constants["mean"]) / self.constants["std"]
 
-        if self.tracer:
+        if self.tracer: #false for CE-RP
             input_tracer = (
-                torch.from_numpy(self.reader["data"][i + self.start, t1, 4:5])
+                torch.from_numpy(self.reader["data"][i + self.start, t1, 4:5]) #4:5 is the tracer channel
                 .type(torch.float32)
                 .reshape(1, self.resolution, self.resolution)
             )
@@ -283,7 +283,7 @@ class Riemann(CompressibleBase):
     def __init__(self, *args, tracer=False, **kwargs):
         self.mean_pressure = 0.215
         file_path = "/CE-RP.nc"
-        if tracer:
+        if tracer: #False
             raise NotImplementedError("Tracer not implemented for Riemann")
         super().__init__(file_path, *args, tracer=tracer, **kwargs)
 
