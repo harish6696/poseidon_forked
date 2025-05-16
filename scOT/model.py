@@ -143,17 +143,21 @@ class LayerNorm(nn.LayerNorm):
 class ConditionalLayerNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
-        self.eps = eps
+        self.eps = eps # small constant to avoid division by zero
+        # instead of using nn.Parameter like in LayerNorm, weight and bias are learned linear functions of time (-> they vary with time)
         self.weight = nn.Linear(1, dim)
         self.bias = nn.Linear(1, dim)
 
     def forward(self, x, time):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = (x**2).mean(dim=-1, keepdim=True) - mean**2
+        # x: [16, 1024, 48]
+        # compute mean and variance of input over last dimension (like in LayerNorm)
+        mean = x.mean(dim=-1, keepdim=True) # [16, 1024, 1]
+        var = (x**2).mean(dim=-1, keepdim=True) - mean**2 # [16, 1024, 1]
+        # Normalize input x (zero mean, unit variance)
         x = (x - mean) / (var + self.eps).sqrt()
-        time = time.reshape(-1, 1).type_as(x)
-        weight = self.weight(time).unsqueeze(1)
-        bias = self.bias(time).unsqueeze(1)
+        time = time.reshape(-1, 1).type_as(x) # [16, 1]
+        weight = self.weight(time).unsqueeze(1) #[16, 1, 48]
+        bias = self.bias(time).unsqueeze(1) # [16, 1, 48]
         if x.dim() == 4:
             weight = weight.unsqueeze(1)
             bias = bias.unsqueeze(1)
@@ -255,31 +259,31 @@ class ScOTPatchEmbeddings(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        image_size, patch_size = config.image_size, config.patch_size
-        num_channels, hidden_size = config.num_channels, config.embed_dim
-        image_size = (
+        image_size, patch_size = config.image_size, config.patch_size # 128, 4
+        num_channels, hidden_size = config.num_channels, config.embed_dim # 4, 48
+        image_size = ( # (128, 128)
             image_size
             if isinstance(image_size, collections.abc.Iterable)
             else (image_size, image_size)
         )
-        patch_size = (
+        patch_size = ( # (4, 4)
             patch_size
             if isinstance(patch_size, collections.abc.Iterable)
             else (patch_size, patch_size)
         )
         num_patches = (image_size[1] // patch_size[1]) * (
             image_size[0] // patch_size[0]
-        )
+        )# 1024 = (128 / 4) * (128 / 4)
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
         self.num_patches = num_patches
-        self.grid_size = (
+        self.grid_size = ( # number of patches in each dimension of the image
             image_size[0] // patch_size[0],
             image_size[1] // patch_size[1],
-        )
+        ) # (32, 32) = 128 / 4
 
-        self.projection = nn.Conv2d(
+        self.projection = nn.Conv2d( # ToDo: 2D!
             num_channels, hidden_size, kernel_size=patch_size, stride=patch_size
         )
 
@@ -295,17 +299,19 @@ class ScOTPatchEmbeddings(nn.Module):
     def forward(
         self, pixel_values: Optional[torch.FloatTensor]
     ) -> Tuple[torch.Tensor, Tuple[int]]:
-        _, num_channels, height, width = pixel_values.shape
+        _, num_channels, height, width = pixel_values.shape # 4, 128, 128
         if num_channels != self.num_channels:
             raise ValueError(
                 "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
             )
-        # pad the input to be divisible by self.patch_size, if needed
+        # pad the input to be divisible by self.patch_size, if needed (zero padding)
         pixel_values = self.maybe_pad(pixel_values, height, width)
-        embeddings = self.projection(pixel_values)
-        _, _, height, width = embeddings.shape
+        embeddings = self.projection(pixel_values) # pixel values: 16, 4, 128, 128 (see drawing ipad)
+        _, _, height, width = embeddings.shape # 16, 48, 32, 32
         output_dimensions = (height, width)
         embeddings = embeddings.flatten(2).transpose(1, 2)
+        # flatten(2) -> 32 * 32 = 1024 -> [16, 48, 1024]
+        # transpose(1, 2) -> [16, 1024, 48]
 
         return embeddings, output_dimensions
 
@@ -318,52 +324,49 @@ class ScOTEmbeddings(nn.Module):
     def __init__(self, config, use_mask_token=False):
         super().__init__()
 
-        self.patch_embeddings = ScOTPatchEmbeddings(config)
-        num_patches = self.patch_embeddings.num_patches
-        self.patch_grid = self.patch_embeddings.grid_size
-        self.mask_token = (
+        self.patch_embeddings = ScOTPatchEmbeddings(config) # use convolution to calculate patch embeddings
+        num_patches = self.patch_embeddings.num_patches # 1024
+        self.patch_grid = self.patch_embeddings.grid_size # (32, 32)
+        self.mask_token = ( # None
             nn.Parameter(torch.zeros(1, 1, config.embed_dim))
             if use_mask_token
             else None
         )
-
-        if config.use_absolute_embeddings:
-            self.position_embeddings = nn.Parameter(
+        if config.use_absolute_embeddings: # absolute position information into the patch embeddings (spatial structure of trajectory)
+            self.position_embeddings = nn.Parameter( # zeros of shape (1: broadcast the same positional embeddings across all inputs in the batch, number of patches, dimensionality of each token)
                 torch.zeros(1, num_patches, config.embed_dim)
             )
         else:
             self.position_embeddings = None
-
         if config.use_conditioning:
             layer_norm = ConditionalLayerNorm
         else:
             layer_norm = LayerNorm
-
         self.norm = layer_norm(config.embed_dim)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
         self,
-        pixel_values: Optional[torch.FloatTensor],
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        time: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.FloatTensor], # [16, 4, 128, 128]
+        bool_masked_pos: Optional[torch.BoolTensor] = None, # None
+        time: Optional[torch.FloatTensor] = None, # [16]
     ) -> Tuple[torch.Tensor]:
-        embeddings, output_dimensions = self.patch_embeddings(pixel_values)
-        embeddings = self.norm(embeddings, time)
+        embeddings, output_dimensions = self.patch_embeddings(pixel_values) # patch embeddings: [16, 4, 128, 128] -> [16, 1024, 48]
+        embeddings = self.norm(embeddings, time) # [16, 1024, 48]
         batch_size, seq_len, _ = embeddings.size()
 
-        if bool_masked_pos is not None:
+        if bool_masked_pos is not None: # None # Boolean masked positions: Indicates which patches are masked (1) and which aren't (0)
             mask_tokens = self.mask_token.expand(batch_size, seq_len, -1)
             # replace the masked visual tokens by mask_tokens
             mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
             embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
 
-        if self.position_embeddings is not None:
+        if self.position_embeddings is not None: # None # adds positional information to patch embeddings: spatial structure of the patch (in the trajectory) (compare with position of pixels in image)
             embeddings = embeddings + self.position_embeddings
 
         embeddings = self.dropout(embeddings)
 
-        return embeddings, output_dimensions
+        return embeddings, output_dimensions # [16, 1024, 48], (32, 32)
 
 
 class ScOTLayer(nn.Module):
@@ -403,6 +406,11 @@ class ScOTLayer(nn.Module):
         self.intermediate = Swinv2Intermediate(config, dim)
         self.output = Swinv2Output(config, dim)
         self.layernorm_after = layer_norm(dim, eps=config.layer_norm_eps)
+        
+        # Cache for attention masks
+        self.attn_mask_cache = {}
+        # Cache for padding calculations
+        self.pad_cache = {}
 
     def set_shift_and_window_size(self, input_resolution):
         target_window_size = (
@@ -435,6 +443,11 @@ class ScOTLayer(nn.Module):
         )
 
     def get_attn_mask(self, height, width, dtype):
+        # Use cached attention mask when possible
+        cache_key = (height, width, self.shift_size, self.window_size, dtype)
+        if cache_key in self.attn_mask_cache:
+            return self.attn_mask_cache[cache_key]
+            
         if self.shift_size > 0:
             # calculate attention mask for shifted window multihead self attention
             img_mask = torch.zeros((1, height, width, 1), dtype=dtype)
@@ -454,21 +467,37 @@ class ScOTLayer(nn.Module):
                     img_mask[:, height_slice, width_slice, :] = count
                     count += 1
 
-            mask_windows = window_partition(img_mask, self.window_size) #partition into windows and stack in dim 0
+            mask_windows = window_partition(img_mask, self.window_size)
             mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
             attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.maskeda23_fill(
+            attn_mask = attn_mask.masked_fill(
                 attn_mask != 0, float(-100.0)
             ).masked_fill(attn_mask == 0, float(0.0))
         else:
             attn_mask = None
+            
+        # Cache the result
+        self.attn_mask_cache[cache_key] = attn_mask
         return attn_mask
 
     def maybe_pad(self, hidden_states, height, width):
+        # Use cached padding calculations when possible
+        cache_key = (height, width, self.window_size)
+        if cache_key in self.pad_cache:
+            pad_values = self.pad_cache[cache_key]
+            if pad_values[3] > 0 or pad_values[5] > 0:
+                hidden_states = nn.functional.pad(hidden_states, pad_values)
+            return hidden_states, pad_values
+            
         pad_right = (self.window_size - width % self.window_size) % self.window_size
         pad_bottom = (self.window_size - height % self.window_size) % self.window_size
         pad_values = (0, 0, 0, pad_right, 0, pad_bottom)
-        hidden_states = nn.functional.pad(hidden_states, pad_values)
+        
+        # Cache the pad values
+        self.pad_cache[cache_key] = pad_values
+        
+        if pad_right > 0 or pad_bottom > 0:
+            hidden_states = nn.functional.pad(hidden_states, pad_values)
         return hidden_states, pad_values
 
     def forward(
@@ -482,17 +511,17 @@ class ScOTLayer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not always_partition:
             self.set_shift_and_window_size(input_dimensions)
-        else:
-            pass
+            
         height, width = input_dimensions
-        batch_size, _, channels = hidden_states.size()
+        batch_size, seq_len, channels = hidden_states.size()
         shortcut = hidden_states
 
-        # pad hidden_states to multiples of window size
+        # Reshape and pad in one step if needed
         hidden_states = hidden_states.view(batch_size, height, width, channels)
         hidden_states, pad_values = self.maybe_pad(hidden_states, height, width)
         _, height_pad, width_pad, _ = hidden_states.shape
-        # cyclic shift
+        
+        # Only apply cyclic shift if needed
         if self.shift_size > 0:
             shifted_hidden_states = torch.roll(
                 hidden_states, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
@@ -500,55 +529,53 @@ class ScOTLayer(nn.Module):
         else:
             shifted_hidden_states = hidden_states
 
-        # partition windows
-        hidden_states_windows = window_partition(
-            shifted_hidden_states, self.window_size
-        )
+        hidden_states_windows = window_partition(shifted_hidden_states, self.window_size)
         hidden_states_windows = hidden_states_windows.view(
             -1, self.window_size * self.window_size, channels
         )
+        
+        # Get attention mask (cached when possible)
         attn_mask = self.get_attn_mask(height_pad, width_pad, dtype=hidden_states.dtype)
         if attn_mask is not None:
             attn_mask = attn_mask.to(hidden_states_windows.device)
-
+            
         attention_outputs = self.attention(
             hidden_states_windows,
             attn_mask,
             head_mask,
             output_attentions=output_attentions,
         )
-
         attention_output = attention_outputs[0]
-
+        
+        # Reconstruct feature map
         attention_windows = attention_output.view(
             -1, self.window_size, self.window_size, channels
         )
         shifted_windows = window_reverse(
             attention_windows, self.window_size, height_pad, width_pad
         )
-
-        # reverse cyclic shift
+        
+        # Reverse cyclic shift if needed
         if self.shift_size > 0:
             attention_windows = torch.roll(
                 shifted_windows, shifts=(self.shift_size, self.shift_size), dims=(1, 2)
             )
         else:
             attention_windows = shifted_windows
-
+            
+        # Handle padding if necessary
         was_padded = pad_values[3] > 0 or pad_values[5] > 0
         if was_padded:
             attention_windows = attention_windows[:, :height, :width, :].contiguous()
-
+            
         attention_windows = attention_windows.view(batch_size, height * width, channels)
-        hidden_states = self.layernorm_before(attention_windows, time)
-        hidden_states = shortcut + self.drop_path(hidden_states)
-
-        layer_output = self.intermediate(hidden_states)
-        layer_output = self.output(layer_output)
-        layer_output = hidden_states + self.drop_path(
-            self.layernorm_after(layer_output, time)
-        )
-
+        
+        hidden_states = shortcut + self.drop_path(self.layernorm_before(attention_windows, time))
+        
+        residual = hidden_states
+        layer_output = self.output(self.intermediate(hidden_states))
+        layer_output = residual + self.drop_path(self.layernorm_after(layer_output, time))
+        
         layer_outputs = (
             (layer_output, attention_outputs[1])
             if output_attentions
@@ -945,16 +972,16 @@ class ScOTEncoder(nn.Module):
 
     def __init__(self, config, grid_size, pretrained_window_sizes=(0, 0, 0, 0)):
         super().__init__()
-        self.num_layers = len(config.depths)
+        self.num_layers = len(config.depths) # 4
         self.config = config
         if self.config.pretrained_window_sizes is not None:
             pretrained_window_sizes = config.pretrained_window_sizes
-        drop_rates_encode_decode = torch.linspace(
-            0, config.drop_path_rate, 2 * sum(config.depths)
+        drop_rates_encode_decode = torch.linspace( # Create linearly increasing sequence of drop probabilites ranging from 0 to drop_path_rate
+            0, config.drop_path_rate, 2 * sum(config.depths) # twice the number of total blocks bc of encoder AND decoder
         )
         dpr = [
             x.item()
-            for x in drop_rates_encode_decode[: drop_rates_encode_decode.shape[0] // 2]
+            for x in drop_rates_encode_decode[: drop_rates_encode_decode.shape[0] // 2] # only first half (encoder) for drop path rates
         ]
         self.layers = nn.ModuleList(
             [
@@ -967,7 +994,7 @@ class ScOTEncoder(nn.Module):
                     ),
                     depth=config.depths[i_layer],
                     num_heads=config.num_heads[i_layer],
-                    drop_path=dpr[
+                    drop_path=dpr[ # each ScOTEncodeStage receives its own slice of drop path schedule
                         sum(config.depths[:i_layer]) : sum(config.depths[: i_layer + 1])
                     ],
                     downsample=(
@@ -1085,11 +1112,11 @@ class ScOTDecoder(nn.Module):
         if self.config.pretrained_window_sizes is not None:
             pretrained_window_sizes = config.pretrained_window_sizes
         drop_rates_encode_decode = torch.linspace(
-            0, config.drop_path_rate, 2 * sum(config.depths)
+            0, config.drop_path_rate, 2 * sum(config.depths) # same as for encoder
         )
         dpr = [
             x.item()
-            for x in drop_rates_encode_decode[drop_rates_encode_decode.shape[0] // 2 :]
+            for x in drop_rates_encode_decode[drop_rates_encode_decode.shape[0] // 2 :] # only second parth (decoder) used for drop path rates
         ]
         self.layers = nn.ModuleList(
             [
@@ -1225,12 +1252,13 @@ class ScOT(Swinv2PreTrainedModel):
         self.config = config
         self.num_layers_encoder = len(config.depths)
         self.num_layers_decoder = len(config.depths)
-        self.num_features = int(config.embed_dim * 2 ** (self.num_layers_encoder - 1))
+        self.num_features = int(config.embed_dim * 2 ** (self.num_layers_encoder - 1)) # the channel size at the final stage of the encoder
 
-        self.embeddings = ScOTEmbeddings(config, use_mask_token=use_mask_token)
-        self.encoder = ScOTEncoder(config, self.embeddings.patch_grid)
-        self.decoder = ScOTDecoder(config, self.embeddings.patch_grid)
-        self.patch_recovery = ScOTPatchRecovery(config)
+
+        self.embeddings = ScOTEmbeddings(config, use_mask_token=use_mask_token) # creates patch embeddings from input
+        self.encoder = ScOTEncoder(config, self.embeddings.patch_grid) # processes embedded input, extracting features
+        self.decoder = ScOTDecoder(config, self.embeddings.patch_grid) # mirrors encoder to reconstruct representation
+        self.patch_recovery = ScOTPatchRecovery(config) # reconstructs final output
 
         if config.residual_model == "convnext":
             res_model = ConvNeXtBlock
@@ -1325,8 +1353,10 @@ class ScOT(Swinv2PreTrainedModel):
 
         if pixel_values is None:
             raise ValueError("pixel_values cannot be None")
-
-        head_mask = self.get_head_mask(
+ # calculate 5D tensor used by attention mechanism to selectively include / exclude attention heads
+        # [batch_size, num_heads, seq_len, seq_len] -> [num_layers, batch_size, num_heads, seq_len, seq_len]
+        # num_layers: different mask at each layer, batch_size: one mask per input sample, num_heads: mask per attention head, seq_len: attention query / key positions
+        head_mask = self.get_head_mask( # [None] * 8
             head_mask, self.num_layers_encoder + self.num_layers_decoder
         )
 
@@ -1338,9 +1368,9 @@ class ScOT(Swinv2PreTrainedModel):
                 [self.num_layers_encoder, self.num_layers_decoder]
             )
 
-        image_size = pixel_values.shape[2]
+        image_size = pixel_values.shape[2]  # 128; image size is x (and y) velocity shape
         # image must be square
-        if image_size != self.config.image_size:
+        if image_size != self.config.image_size:  # in case actual size of data is different from specified one -> upsample or downsample with FFT
             if image_size < self.config.image_size:
                 pixel_values = self._upsample(pixel_values, self.config.image_size)
             else:
@@ -1349,7 +1379,7 @@ class ScOT(Swinv2PreTrainedModel):
         embedding_output, input_dimensions = self.embeddings(
             pixel_values, bool_masked_pos=bool_masked_pos, time=time
         )
-
+        # ToDo: go on here !!!
         encoder_outputs = self.encoder(
             embedding_output,
             input_dimensions,
@@ -1389,10 +1419,11 @@ class ScOT(Swinv2PreTrainedModel):
         sequence_output = decoder_output[0]
         prediction = self.patch_recovery(sequence_output)
         # The following can be used for learning just the residual for time-dependent problems
+        # instead of directly predicting final output, it predicts change (residual) to apply to input
         if self.config.learn_residual:
-            if self.config.num_channels > self.config.num_out_channels:
+            if self.config.num_channels > self.config.num_out_channels: # remove unnecessary channels (like Reynolds-number)
                 pixel_values = pixel_values[:, 0 : self.config.num_out_channels]
-            prediction += pixel_values
+            prediction += pixel_values # original input (pixel_values) is added to prediction
 
         if image_size != self.config.image_size:
             if image_size > self.config.image_size:
@@ -1403,7 +1434,7 @@ class ScOT(Swinv2PreTrainedModel):
         if pixel_mask is not None:
             prediction[pixel_mask] = labels[pixel_mask].type_as(prediction)
         loss = None
-        if labels is not None:
+        if labels is not None: # set loss
             if self.config.p == 1:
                 loss_fn = nn.functional.l1_loss
             elif self.config.p == 2:
@@ -1411,9 +1442,9 @@ class ScOT(Swinv2PreTrainedModel):
             else:
                 raise ValueError("p must be 1 or 2")
             if self.config.channel_slice_list_normalized_loss is not None:
-                loss = torch.mean(
+                loss = torch.mean( # compute average over all normalized slice losses
                     torch.stack(
-                        [
+                        [ # calculate loss of slice
                             loss_fn(
                                 prediction[
                                     :,
@@ -1432,7 +1463,7 @@ class ScOT(Swinv2PreTrainedModel):
                                     ],
                                 ],
                             )
-                            / (
+                            / ( # Normalizing each slice by the magnitude of the corresponding ground_truth slice (i.e. loss between labels and zeros)
                                 loss_fn(
                                     labels[
                                         :,
@@ -1453,7 +1484,7 @@ class ScOT(Swinv2PreTrainedModel):
                                         ]
                                     ),
                                 )
-                                + 1e-10
+                                + 1e-10 # avoid division by zero
                             )
                             for i in range(
                                 len(self.config.channel_slice_list_normalized_loss) - 1
